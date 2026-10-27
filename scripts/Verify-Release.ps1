@@ -15,7 +15,7 @@ if ((Get-FileHash -LiteralPath (Join-Path $Directory 'install.lua') -Algorithm S
 Add-Type -AssemblyName System.IO.Compression
 $zip=[IO.Compression.ZipFile]::OpenRead([IO.Path]::GetFullPath($archive))
 try {
-    $expected=@('DisplayCD.dll','config.ini','LICENSE','NOTICE.md','README.md','MinHook-LICENSE.txt')
+    $expected=@('DisplayCD.dll','config.ini')
     if (@(Compare-Object $expected @($zip.Entries.FullName)).Count) { throw 'Unexpected archive contents.' }
     $stream=$zip.GetEntry('DisplayCD.dll').Open()
     $memory=[IO.MemoryStream]::new()

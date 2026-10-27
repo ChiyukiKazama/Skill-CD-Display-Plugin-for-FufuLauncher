@@ -37,7 +37,7 @@ E／Q 只读取各自开启的技能状态。关闭 Q 显示会恢复原生爆�
 
 需要发版时，进入 GitHub **Actions → Build and release → Run workflow**，选择 `master`，在 `version` 中输入三段版本号，例如 `1.1.0`。Action 使用这个版本构建、压缩和打包；全部检查与 ZIP 上传成功后，自动创建 tag `v1.1.0` 并公开 Release。不追加第四段数字，也无须手动创建 tag。
 
-Release 仅上传成品 `DisplayCD-版本号.zip`。商城信息、安装脚本、哈希及压缩校验报告保留在 Actions 的构建产物中，保存 14 天，需要时可单独下载。
+Release 仅上传成品 `DisplayCD-版本号.zip`，ZIP 内只包含 `DisplayCD.dll` 和 `config.ini`。商城信息、安装脚本、哈希及压缩校验报告保留在 Actions 的构建产物中，保存 14 天，需要时可单独下载。
 
 普通构建使用 `config.ini` 和 `store/metadata.json` 中的基础版本，两处需保持一致。手动发布输入的版本覆盖本次产物的版本，不会改写源码配置。已发布的相同版本会跳过重复发布；如果同版本存在未完成的草稿，工作流会停止并保留草稿供检查，不覆盖已有附件。
 

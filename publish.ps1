@@ -27,16 +27,7 @@ if (Test-Path -LiteralPath $archive) { throw "Release archive already exists: $a
 Add-Type -AssemblyName System.IO.Compression
 $zip=[IO.Compression.ZipFile]::Open($archive,[IO.Compression.ZipArchiveMode]::Create)
 try {
-    $files=@{
-        'DisplayCD.dll'=$dll
-        'LICENSE'=(Join-Path $PSScriptRoot 'LICENSE')
-        'NOTICE.md'=(Join-Path $PSScriptRoot 'NOTICE.md')
-        'README.md'=(Join-Path $PSScriptRoot 'README.md')
-        'MinHook-LICENSE.txt'=(Join-Path $PSScriptRoot 'vendor\minhook\LICENSE.txt')
-    }
-    foreach ($entry in $files.GetEnumerator()) {
-        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$entry.Value,$entry.Key) | Out-Null
-    }
+    [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$dll,'DisplayCD.dll') | Out-Null
     $writer=[IO.StreamWriter]::new($zip.CreateEntry('config.ini').Open(),[Text.UTF8Encoding]::new($false))
     try { $writer.Write($config) } finally { $writer.Dispose() }
 } finally { $zip.Dispose() }
