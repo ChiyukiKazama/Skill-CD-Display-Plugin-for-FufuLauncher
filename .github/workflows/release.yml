@@ -1,0 +1,104 @@
+name: Build and release
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Generate version and tag
+        id: version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          $release = ./scripts/Get-ReleaseVersion.ps1 -RunNumber $env:RUN_NUMBER -RunAttempt $env:RUN_ATTEMPT
+          "version=$($release.Version)" >> $env:GITHUB_OUTPUT
+          "tag=$($release.Tag)" >> $env:GITHUB_OUTPUT
+
+      - name: Locate MSBuild
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild was not found.' }
+          "MSBUILD_PATH=$msbuild" >> $env:GITHUB_ENV
+
+      - name: Build Release x64
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./build.ps1 -MSBuildPath $env:MSBUILD_PATH -Version $env:RELEASE_VERSION
+
+      - name: Compress DLL with UPX and verify integrity and loading
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/Compress-Release.ps1
+
+      - name: Create release package
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./publish.ps1 -Version $env:RELEASE_VERSION -DllPath ./obj/release/DisplayCD.dll
+
+      - name: Verify package, versions and checksums
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/Verify-Release.ps1 -ExpectedVersion $env:RELEASE_VERSION -RequireCompression
+
+      - name: Save completed release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.version.outputs.tag }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build.outputs.tag }}
+          path: dist
+
+      - name: Publish only after every asset is uploaded
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Creation/upload failures leave an unpublished draft, never a partial public release.
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "$SOURCE_SHA" --title "DisplayCD $RELEASE_VERSION" \
+            --draft --generate-notes
+          gh release edit "$RELEASE_TAG" --draft=false --latest

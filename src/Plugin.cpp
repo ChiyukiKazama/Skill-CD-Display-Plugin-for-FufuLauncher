@@ -26,7 +26,7 @@ namespace
                 if (!guard) { Support::Log("Inactive: timed out waiting for shared hook setup."); return 0; }
                 if (!SkillCooldown::Init()) return 0;
             }
-            Support::Log("DisplayCD 1.0.0 initialized; configuration reload interval: 250 ms.");
+            Support::Log("DisplayCD " DISPLAYCD_VERSION " initialized; configuration reload interval: 250 ms.");
             for (;;)
             {
                 Sleep(250);
