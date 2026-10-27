@@ -9,7 +9,7 @@ $metadata=Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 $dll=[IO.Path]::GetFullPath($DllPath)
 if (-not (Test-Path -LiteralPath $dll)) { throw 'Build Release x64 before packaging.' }
 if (-not $Version) { $Version=[string]$metadata.version }
-if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw 'Package version must have three or four numeric components.' }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Package version must have exactly three numeric components.' }
 $config=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'config.ini'))
 $general=[regex]::Match($config,'(?ms)^\[General\]\s*\r?\n(?<body>.*?)(?=^\[|\z)')
 $versionLine=[regex]::Match($general.Value,'(?m)^Version\s*=\s*(\S+)\s*$')

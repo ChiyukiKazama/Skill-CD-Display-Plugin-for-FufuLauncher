@@ -33,9 +33,13 @@ E／Q 只读取各自开启的技能状态。关闭 Q 显示会恢复原生爆�
 
 ## GitHub Actions 自动发布
 
-推送到 `master` 或在 Actions 中手动运行 `Build and release`，会依次完成：Release x64 构建 → UPX `--best --ultra-brute` 压缩 → UPX 完整性、解压与 Windows DLL 加载检查 → 打包及版本／SHA256 校验 → 上传全部附件 → 公开 GitHub Release。PR 只构建和验证。
+推送到 `master` 和 PR 只进行构建、UPX 压缩及校验，并保留构建附件，不发布 Release。
 
-基础版本保留在 `config.ini` 和 `store/metadata.json`，两处必须一致，例如 `1.0.0`。Action 自动追加数字后缀 `运行序号 × 100 + 重试次数`：第 7 次运行的首次尝试生成版本 `1.0.0.701`，tag 为 `v1.0.0.701`；重试生成 `1.0.0.702`。使用四段数字以兼容启动器的版本比较，无须手动创建 tag。
+需要发版时，进入 GitHub **Actions → Build and release → Run workflow**，选择 `master`，在 `version` 中输入三段版本号，例如 `1.1.0`。Action 使用这个版本构建、压缩和打包；全部检查与 ZIP 上传成功后，自动创建 tag `v1.1.0` 并公开 Release。不追加第四段数字，也无须手动创建 tag。
+
+Release 仅上传成品 `DisplayCD-版本号.zip`。商城信息、安装脚本、哈希及压缩校验报告保留在 Actions 的构建产物中，保存 14 天，需要时可单独下载。
+
+普通构建使用 `config.ini` 和 `store/metadata.json` 中的基础版本，两处需保持一致。手动发布输入的版本覆盖本次产物的版本，不会改写源码配置。已发布的相同版本会跳过重复发布；如果同版本存在未完成的草稿，工作流会停止并保留草稿供检查，不覆盖已有附件。
 
 构建日志中的插件版本、包内配置、商城信息、ZIP 文件名与 Release tag 使用同一版本。
 

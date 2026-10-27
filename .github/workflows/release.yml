@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (major.minor.patch, e.g. 1.1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -29,13 +34,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Generate version and tag
+      - name: Resolve version and tag
         id: version
         env:
-          RUN_NUMBER: ${{ github.run_number }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          $release = ./scripts/Get-ReleaseVersion.ps1 -RunNumber $env:RUN_NUMBER -RunAttempt $env:RUN_ATTEMPT
+          $release = ./scripts/Get-ReleaseVersion.ps1 -Version $env:REQUESTED_VERSION
           "version=$($release.Version)" >> $env:GITHUB_OUTPUT
           "tag=$($release.Tag)" >> $env:GITHUB_OUTPUT
 
@@ -76,7 +80,7 @@ jobs:
 
   release:
     needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -87,7 +91,7 @@ jobs:
           name: release-${{ needs.build.outputs.tag }}
           path: dist
 
-      - name: Publish only after every asset is uploaded
+      - name: Publish ZIP after all checks pass
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -97,8 +101,22 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Creation/upload failures leave an unpublished draft, never a partial public release.
-          gh release create "$RELEASE_TAG" dist/* \
+          # Preserve published versions. Only an explicit manual run may publish.
+          if state=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.draft' 2>release-lookup-error.log); then
+            if [[ "$state" == "false" ]]; then
+              echo "Release $RELEASE_TAG already exists; skipping duplicate publication."
+              exit 0
+            fi
+            echo "::error::An unpublished draft for $RELEASE_TAG exists. Remove or finish that draft before publishing this version."
+            exit 1
+          elif ! grep -q 'HTTP 404' release-lookup-error.log; then
+            cat release-lookup-error.log >&2
+            exit 1
+          fi
+          archive="dist/DisplayCD-$RELEASE_VERSION.zip"
+          test -f "$archive"
+          # Only the finished ZIP is attached; auxiliary files stay in Actions artifacts.
+          gh release create "$RELEASE_TAG" "$archive" \
             --target "$SOURCE_SHA" --title "DisplayCD $RELEASE_VERSION" \
             --draft --generate-notes
           gh release edit "$RELEASE_TAG" --draft=false --latest
