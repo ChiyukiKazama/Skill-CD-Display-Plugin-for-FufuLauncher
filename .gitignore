@@ -1,0 +1,8 @@
+.vs/
+*.user
+bin/
+obj/
+dist/
+tests/
+__pycache__/
+*.log
