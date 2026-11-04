@@ -16,7 +16,9 @@ Add-Type -AssemblyName System.IO.Compression
 $zip=[IO.Compression.ZipFile]::OpenRead([IO.Path]::GetFullPath($archive))
 try {
     $expected=@('DisplayCD.dll','config.ini')
-    if (@(Compare-Object $expected @($zip.Entries.FullName)).Count) { throw 'Unexpected archive contents.' }
+    if (@(Compare-Object $expected @($zip.Entries.FullName)).Count) {
+        throw 'ZIP must contain root-level DisplayCD.dll and config.ini only; do not wrap them in a version directory.'
+    }
     $stream=$zip.GetEntry('DisplayCD.dll').Open()
     $memory=[IO.MemoryStream]::new()
     try { $stream.CopyTo($memory); $dll=$memory.ToArray() } finally { $stream.Dispose(); $memory.Dispose() }

@@ -16,7 +16,7 @@ namespace
         wchar_t executable[32768]{};
         GetModuleFileNameW(nullptr, executable, 32768);
         if (_wcsicmp(std::filesystem::path(executable).filename().c_str(), L"YuanShen.exe") != 0)
-        { Support::Log("Inactive: only the verified CN 7.1 YuanShen.exe build is supported."); return 0; }
+        { Support::Log("Inactive: only verified CN 7.1 / CN 7.2 YuanShen.exe builds are supported."); return 0; }
         try
         {
             const auto config = Support::Directory() / L"config.ini";

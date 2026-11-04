@@ -20,7 +20,7 @@ namespace SkillCooldown
 {
     namespace
     {
-        namespace Native = Patterns::SkillCooldownCN71;
+        const Patterns::SkillCooldownProfile* g_Native = nullptr;
         struct Vec2 { float x, y; };
         struct Vec3 { float x, y, z; };
         struct Rect { float x, y, width, height; };
@@ -36,6 +36,7 @@ namespace SkillCooldown
         // through memory, not XMM0 or two integer return registers.
         using GetEncoded = Encoded*(__fastcall*)(Encoded*, void*, void*);
         using GetCount = int(__fastcall*)(void*, void*);
+        using GetFloat = float(__fastcall*)(void*, void*);
         using FloatDecode = float(__fastcall*)(const Encoded*, void*);
         using IntDecode = int(__fastcall*)(const Encoded*, void*);
         using GetObject = void*(__fastcall*)(void*, void*);
@@ -51,21 +52,24 @@ namespace SkillCooldown
         using SetupCharges = void(__fastcall*)(void*, int, void*);
         using FindTransform = void*(__fastcall*)(void*, void*, void*);
         using ComponentByType = void*(__fastcall*)(void*, void*);
+        using ComponentByName = void*(__fastcall*)(void*, void*, void*);
         using Concat = void*(__fastcall*)(void*, void*, void*);
         using SetColor = void(__fastcall*)(void*, const Color*, void*);
+        using SetFloat = void(__fastcall*)(void*, float, void*);
         using StringNew = void*(__fastcall*)(const char*);
         StringNew g_StringNew = nullptr;
 
         Bind g_Bind = nullptr;
         Setup g_Setup = nullptr;
         Unary g_Update = nullptr, g_Disable = nullptr, g_Destroy = nullptr;
+        Unary g_UpdateTeam = nullptr;
         Resolve g_Resolve = nullptr;
         FloatDecode g_DecodeFloat = nullptr;
         IntDecode g_DecodeInt = nullptr;
         Clone g_Clone = nullptr;
         Unary g_DestroyObject = nullptr;
         GetObject g_Transform = nullptr, g_GameObject = nullptr, g_ObjectTransform = nullptr;
-        GetBool g_GetEnabled = nullptr;
+        GetBool g_GetEnabled = nullptr, g_GetActiveInHierarchy = nullptr;
         SetBool g_SetEnabled = nullptr, g_SetActive = nullptr, g_SetRaycast = nullptr;
         GetRect g_GetRect = nullptr;
         TransformPoint g_TransformPoint = nullptr, g_InversePoint = nullptr;
@@ -76,8 +80,10 @@ namespace SkillCooldown
         SetupCharges g_SetupCharges = nullptr;
         FindTransform g_FindTransform = nullptr;
         ComponentByType g_ComponentByType = nullptr;
+        ComponentByName g_ComponentByName = nullptr;
         Concat g_Concat = nullptr;
         SetColor g_SetColor = nullptr;
+        SetFloat g_SetMaskFill = nullptr;
         std::array<void*, 33> g_ChargeSources{};
         uintptr_t g_Base = 0, g_End = 0;
         std::atomic<bool> g_UIFault{false};
@@ -86,6 +92,9 @@ namespace SkillCooldown
         {
             void* text = nullptr;
             char last[64] = {};
+            void* ring = nullptr;
+            void* ringMask = nullptr;
+            bool ringAttempted = false;
         };
         struct ChargeView
         {
@@ -106,6 +115,7 @@ namespace SkillCooldown
         {
             void* state = nullptr;
             float remaining = 0;
+            float fraction = 1;
             int available = 0, maximum = 0;
         };
         // UI state is used only from native HUD callbacks. The GUID whitelist
@@ -130,8 +140,8 @@ namespace SkillCooldown
             if (!object) return nullptr;
             auto* klass = Read<void*>(object, 0);
             if (!klass) return nullptr;
-            // This game's IL2CPP vtable has 8-byte code entries at class+0xD0.
-            auto address = Read<uintptr_t>(klass, 0xD0 + slot * sizeof(void*));
+            // Both verified binaries use 8-byte code entries in their IL2CPP vtable.
+            auto address = Read<uintptr_t>(klass, g_Native->layout.VTable + slot * sizeof(void*));
             if (address < g_Base || address >= g_End) return nullptr;
             return reinterpret_cast<T>(address);
         }
@@ -149,13 +159,13 @@ namespace SkillCooldown
             if (!avatar) return false;
             // Only inspect a proven AvatarEntity: the GUID offset does not
             // apply to monsters, gadgets or the base Entity class.
-            if (Read<void*>(avatar, 0) != Read<void*>(reinterpret_cast<void*>(g_Base), 0x57B1570))
+            if (Read<void*>(avatar, 0) != Read<void*>(reinterpret_cast<void*>(g_Base), g_Native->layout.AvatarEntityType))
                 return false;
-            const auto guid = Read<uint64_t>(avatar, 0x558);
+            const auto guid = Read<uint64_t>(avatar, g_Native->layout.AvatarGuid);
             void* controller = g_Controller.load();
             if (controller)
             {
-                void* list = Read<void*>(controller, 0x4F0);
+                void* list = Read<void*>(controller, g_Native->layout.TeamRows);
                 void* array = list ? Read<void*>(list, 0x10) : nullptr;
                 const int count = list ? Read<int>(list, 0x18) : 0;
                 if (!array || count <= 0 || count > 32 ||
@@ -182,7 +192,7 @@ namespace SkillCooldown
             // Same resolved-slot array and fallback as native MonoBattleBtn.
             // Re-resolve every tick so tap/hold variants and replacements are
             // not cached against a stale skill ID.
-            void* array = Read<void*>(component, 0x2B0);
+            void* array = Read<void*>(component, g_Native->layout.SkillStates);
             if (array && Read<uintptr_t>(array, 0x18) > slot)
             {
                 return Read<void*>(array, 0x20 + slot * sizeof(void*));
@@ -199,6 +209,15 @@ namespace SkillCooldown
             Encoded value{};
             remaining(&value, result.state, nullptr);
             result.remaining = g_DecodeFloat(&value, nullptr);
+            if (std::isfinite(result.remaining) && result.remaining > 0)
+            {
+                // Skill-state slot 18 is the native remaining/total cooldown
+                // ratio, including charge-based skills. Do not infer duration
+                // from a configured skill ID or from the first observed tick.
+                auto progress = Virtual<GetFloat>(result.state, 18);
+                const float ratio = progress ? progress(result.state, nullptr) : 1;
+                if (std::isfinite(ratio) && ratio > 0 && ratio <= 1) result.fraction = ratio;
+            }
             return std::isfinite(result.remaining);
         }
 
@@ -286,6 +305,9 @@ namespace SkillCooldown
             g_SetRaycast(view.text, false, nullptr);
             g_Alignment(view.text, 4, nullptr); // MiddleCenter, inherited native font/material.
             g_SetEnabled(view.text, true, nullptr);
+            // The clone has its own visibility, independent of the swap label's tint.
+            const Color white{1, 1, 1, 1};
+            g_SetColor(view.text, &white, nullptr);
             void* transform = g_Transform(view.text, nullptr);
             if (!Alive(transform)) { RemoveText(view); return false; }
             const Vec3 scale{1, 1, 1};
@@ -344,6 +366,53 @@ namespace SkillCooldown
             }
             bounds.width = right - bounds.x; bounds.height = top - bounds.y;
             return bounds.width > 0 && bounds.height > 0;
+        }
+
+        void ShowRing(TextView& view, const Skill& skill)
+        {
+            if (!g_ComponentByName || !g_SetMaskFill || !Alive(view.text)) return;
+            if (!view.ringAttempted)
+            {
+                view.ringAttempted = true;
+                void* parent = g_Transform(view.text, nullptr);
+                if (!Alive(parent)) return;
+                view.ring = g_FindTransform(parent, g_StringNew("CDMask"), nullptr);
+                if (!Alive(view.ring)) return;
+                void* ringObject = g_GameObject(view.ring, nullptr);
+                g_SetActive(ringObject, true, nullptr);
+                void* image = g_ComponentByName(ringObject, g_StringNew("UnityEngine.UI.Image"), nullptr);
+                if (Alive(image))
+                {
+                    g_SetRaycast(image, false, nullptr);
+                    g_SetEnabled(image, true, nullptr);
+                    Color color{};
+                    std::memcpy(&color, static_cast<const uint8_t*>(image) + 0x24, sizeof(color));
+                    if (std::isfinite(color.a) && color.a <= 0)
+                    {
+                        color.a = 1;
+                        g_SetColor(image, &color, nullptr);
+                    }
+                }
+                view.ringMask = g_ComponentByName(ringObject, g_StringNew("UnityEngine.UI.SmoothMask"), nullptr);
+                if (!Alive(view.ringMask))
+                    view.ringMask = g_ComponentByName(g_GameObject(view.text, nullptr), g_StringNew("UnityEngine.UI.SmoothMask"), nullptr);
+                if (Alive(view.ringMask)) g_SetEnabled(view.ringMask, true, nullptr);
+            }
+            // Preserve the native ring's RectTransform. Its diameter intentionally
+            // extends beyond the text height so it encloses multi-digit timers.
+            if (Alive(view.ringMask))
+                g_SetMaskFill(view.ringMask, skill.fraction, nullptr);
+        }
+
+        void GuardShowRing(TextView* view, const Skill* skill)
+        {
+            __try { ShowRing(*view, *skill); }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                // The decorative ring must not stop valid cooldown digits.
+                view->ring = view->ringMask = nullptr;
+                view->ringAttempted = true;
+            }
         }
 
         void* ListEntry(void* list, int index)
@@ -416,7 +485,7 @@ namespace SkillCooldown
             if (!Alive(button)) return false;
             void* panel = Read<void*>(button, 0xD8); // MonoBaseSkillBtn.EGHGGFHBNPN
             if (!Alive(panel)) return false;
-            // Native OKLIFOLHAMN selects skillPointPanels[maximum - 2]. Each
+            // The native charge builder selects skillPointPanels[maximum - 2]. Each
             // entry contains the original diamond sprites and their layout.
             void* group = ListEntry(Read<void*>(panel, 0x18), maximum - 2);
             if (!Alive(group)) return false;
@@ -432,8 +501,8 @@ namespace SkillCooldown
             g_SetScale(view.transform, &scale, nullptr);
             // Use the same runtime name prefix and Image type as the native
             // builder, including numeric order rather than sibling order.
-            void* prefix = Read<void*>(reinterpret_cast<void*>(g_Base), Native::ChargeNamePrefix);
-            void* imageType = Read<void*>(reinterpret_cast<void*>(g_Base), Native::ChargeImageType);
+            void* prefix = Read<void*>(reinterpret_cast<void*>(g_Base), g_Native->ChargeNamePrefix);
+            void* imageType = Read<void*>(reinterpret_cast<void*>(g_Base), g_Native->ChargeImageType);
             auto stringNew = g_StringNew;
             if (!prefix || !imageType || !stringNew)
             { RemoveCharges(view); return false; }
@@ -535,21 +604,44 @@ namespace SkillCooldown
             }
         }
 
-        bool PlaceText(TextView& view, void* anchor, void* parent, bool isE,
-                       void* qAnchor = nullptr)
+        bool LabelBounds(void* anchor, void* parent, Rect& bounds, float& depth, bool naturalSize)
         {
-            if (!Alive(view.text)) return false;
-            void* transform = g_Transform(view.text, nullptr);
+            if (BoundsInRow(anchor, parent, bounds, depth)) return true;
+            if (!naturalSize || !Alive(anchor) || !Alive(parent)) return false;
+            // A solo on-field row has no sibling template. Its inactive/zero-scale
+            // glyph still provides a native Rect and a stable centre in the row.
+            Rect rect{};
+            g_GetRect(&rect, anchor, nullptr);
+            if (!std::isfinite(rect.x) || !std::isfinite(rect.y) ||
+                !std::isfinite(rect.width) || !std::isfinite(rect.height) ||
+                rect.width <= 0 || rect.height <= 0) return false;
+            const Vec3 centre{rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f, 0};
+            Vec3 world{}, local{};
+            g_TransformPoint(&world, anchor, &centre, nullptr);
+            g_InversePoint(&local, parent, &world, nullptr);
+            if (!std::isfinite(local.x) || !std::isfinite(local.y) || !std::isfinite(local.z)) return false;
+            bounds = {local.x - rect.width * 0.5f, local.y - rect.height * 0.5f, rect.width, rect.height};
+            depth = local.z;
+            return true;
+        }
+
+        bool MeasureText(void* object, void* parent, bool isE, Vec2& size, Vec3& local, bool naturalSize = false)
+        {
+            void* glyph = Read<void*>(object, 0x1B0);
+            void* icon = Read<void*>(object, 0x58);
+            void* anchor = isE ? icon : glyph;
+            if (!Alive(anchor)) return false;
             Rect rect{};
             float depth = 0;
-            if (!Alive(transform) || !BoundsInRow(anchor, parent, rect, depth)) return false;
-            Vec2 size{rect.width * 1.5f, rect.height};
-            Vec3 local{rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f, depth};
+            if (!LabelBounds(g_Transform(anchor, nullptr), parent, rect, depth, naturalSize)) return false;
+            size = {rect.width * 1.5f, rect.height};
+            local = {rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f, depth};
             if (isE)
             {
                 Rect qBounds{};
                 float qDepth = 0;
-                if (!BoundsInRow(qAnchor, parent, qBounds, qDepth)) return false;
+                if (!Alive(glyph) || !LabelBounds(g_Transform(glyph, nullptr), parent, qBounds, qDepth, naturalSize))
+                    return false;
                 // Use the burst glyph's center and diameter for both labels.
                 // The avatar portrait's center is vertically offset from it.
                 size = {qBounds.width * 1.5f, qBounds.height};
@@ -561,6 +653,34 @@ namespace SkillCooldown
                 // puts E and Q on top of each other in that layout.
                 local.x = left - qBounds.height * 0.1f - size.x * 0.5f;
             }
+            return true;
+        }
+
+        bool PlaceText(TextView& view, void* object, void* parent, bool isE)
+        {
+            if (!Alive(view.text)) return false;
+            void* transform = g_Transform(view.text, nullptr);
+            if (!Alive(transform)) return false;
+            Vec2 size{};
+            Vec3 local{};
+            if (!MeasureText(object, parent, isE, size, local))
+            {
+                bool measured = false;
+                void* controller = g_Controller.load();
+                void* list = controller ? Read<void*>(controller, g_Native->layout.TeamRows) : nullptr;
+                const int count = list ? Read<int>(list, 0x18) : 0;
+                // Use the same prefab's local geometry, never a teammate's world
+                // position. The current row's own transform still selects its slot.
+                for (int i = 0; i < count && count <= 32 && !measured; ++i)
+                {
+                    void* peer = ListEntry(list, i);
+                    if (peer == object || !Alive(peer)) continue;
+                    void* peerObject = g_GameObject(peer, nullptr);
+                    if (!Alive(peerObject) || !g_GetActiveInHierarchy(peerObject, nullptr)) continue;
+                    measured = MeasureText(peer, g_Transform(peer, nullptr), isE, size, local);
+                }
+                if (!measured && !MeasureText(object, parent, isE, size, local, true)) return false;
+            }
             Vec3 position{};
             g_TransformPoint(&position, parent, &local, nullptr);
             if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
@@ -568,6 +688,15 @@ namespace SkillCooldown
             g_SetSize(transform, size, nullptr);
             g_SetPosition(transform, &position, nullptr);
             return true;
+        }
+
+        bool UpdateTimer(TextView& view, const Skill& skill, const char* text, void* object, void* parent, bool isE)
+        {
+            const bool visible = text && CreateText(view, Read<void*>(object, 0xA0), parent) &&
+                PlaceText(view, object, parent, isE) && ShowText(view, text);
+            if (visible) GuardShowRing(&view, &skill);
+            else ShowText(view, nullptr);
+            return visible;
         }
 
         void UpdateView(void* object, Row& row)
@@ -581,13 +710,13 @@ namespace SkillCooldown
             const auto guid = Read<uint64_t>(object, 0x178);
             void* component = Read<void*>(object, 0x188);
             void* avatar = component ? Read<void*>(component, 0x28) : nullptr;
-            if (!guid || guid != row.guid || !PartyAvatar(avatar) || Read<uint64_t>(avatar, 0x558) != guid)
+            if (!guid || guid != row.guid || !PartyAvatar(avatar) || Read<uint64_t>(avatar, g_Native->layout.AvatarGuid) != guid)
             {
                 ClearView(row);
                 return;
             }
             Skill e, q;
-            // Like native IEMBBEOJEEK's cooldown adapter, displaying the timer
+            // Like the native cooldown adapter, displaying the timer
             // does not require valid charge metadata. Keep that requirement
             // only for the optional native charge indicators.
             const bool hasE = settings.elementalSkill && ReadCooldown(component, 1, e);
@@ -603,22 +732,14 @@ namespace SkillCooldown
                 HideCharges(row.charges);
                 return;
             }
-            void* source = Read<void*>(object, 0xA0); // Clone; never overwrite swap cooldown.
             void* parent = g_Transform(object, nullptr);
-            void* icon = Read<void*>(object, 0x58);
-            void* qButton = Read<void*>(object, 0x48);
             void* qGlyph = Read<void*>(object, 0x1B0);
             // Both labels are children of the row, so a natively hidden Q
             // button or swap-CD parent cannot hide our cooldown label.
-            void* qAnchor = Alive(qGlyph) ? g_Transform(qGlyph, nullptr) : nullptr;
-            const bool visibleE = showE && Alive(icon) && CreateText(row.e, source, parent) &&
-                PlaceText(row.e, g_Transform(icon, nullptr), parent, true, qAnchor) &&
-                ShowText(row.e, eText);
-            if (!visibleE) ShowText(row.e, nullptr);
+            const bool visibleE = UpdateTimer(row.e, e, showE ? eText : nullptr, object, parent, true);
             if (!visibleE || !eCharges || e.maximum <= 1 || !GuardShowCharges(&row.charges, &row.e, &e))
                 HideCharges(row.charges);
-            const bool visibleQ = showQ && Alive(qButton) && Alive(qGlyph) && CreateText(row.q, source, parent) &&
-                PlaceText(row.q, qAnchor, parent, false) && ShowText(row.q, qText);
+            const bool visibleQ = UpdateTimer(row.q, q, showQ ? qText : nullptr, object, parent, false);
             if (visibleQ)
             {
                 // SetupView caches the actual burst sprite Image here. The
@@ -633,7 +754,6 @@ namespace SkillCooldown
                     g_SetEnabled(image, false, nullptr);
                 }
             }
-            else ShowText(row.q, nullptr);
         }
 
         void GuardRestore(Row* row)
@@ -716,6 +836,59 @@ namespace SkillCooldown
             __except (EXCEPTION_EXECUTE_HANDLER) { g_UIFault.store(true); }
         }
 
+        void RefreshDisabledRows(void* controller, bool restore)
+        {
+            void* list = Read<void*>(controller, g_Native->layout.TeamRows);
+            const int count = list ? Read<int>(list, 0x18) : 0;
+            if (count < 0 || count > 32) return;
+            for (int i = 0; i < count; ++i)
+            {
+                void* object = ListEntry(list, i);
+                if (!Alive(object) || g_GetEnabled(object, nullptr)) continue;
+                auto it = g_Rows.find(object);
+                if (restore)
+                {
+                    if (it != g_Rows.end()) GuardRestore(&it->second);
+                    continue;
+                }
+                const auto guid = Read<uint64_t>(object, 0x178);
+                // Discover the current row even when attaching after HUD setup,
+                // including a one-character party with no enabled row callbacks.
+                if (guid && !g_UIFault.load())
+                {
+                    RefreshRow(object, guid);
+                    it = g_Rows.find(object);
+                }
+                if (it == g_Rows.end()) continue;
+                void* gameObject = g_GameObject(object, nullptr);
+                const bool hidden = !guid || !Alive(gameObject) ||
+                    !g_GetActiveInHierarchy(gameObject, nullptr);
+                GuardView(object, &it->second, hidden);
+            }
+        }
+
+        void GuardDisabledRows(void* controller, bool restore)
+        {
+            __try { RefreshDisabledRows(controller, restore); }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (!g_UIFault.exchange(true))
+                    Support::Log("Skill cooldown HUD stopped after an invalid team list.");
+                for (auto& entry : g_Rows) GuardClear(&entry.second);
+            }
+        }
+
+        void __fastcall HookUpdateTeam(void* controller, void* method)
+        {
+            g_Controller.store(controller);
+            // SetupAnimator/FadeOutEnd disable the on-field MonoTeamBtn, so
+            // Unity no longer calls its Update. Refresh only those paused rows
+            // from the live UI controller; leave the native behaviour disabled.
+            GuardDisabledRows(controller, true);
+            g_UpdateTeam(controller, method);
+            GuardDisabledRows(controller, false);
+        }
+
         void __fastcall HookUpdate(void* object, void* method)
         {
             // Return our temporary glyph override before native refresh. The
@@ -753,11 +926,11 @@ namespace SkillCooldown
             g_Destroy(object, method);
         }
 
-        void* Address(const Native::Method& entry)
+        void* Address(const Patterns::Method& entry)
         {
-            if (entry.rva >= g_End - g_Base || g_End - g_Base - entry.rva < 32) return nullptr;
+            if (!entry.bytes || !*entry.bytes || !entry.rva || entry.rva >= g_End - g_Base || g_End - g_Base - entry.rva < 32) return nullptr;
             void* address = reinterpret_cast<void*>(g_Base + entry.rva);
-            const bool valid = &entry == &Native::SetActive ? Support::SharedSetActive(address, entry.bytes) :
+            const bool valid = &entry == &g_Native->SetActive ? Support::SharedSetActive(address, entry.bytes) :
                 Support::Match(address, entry.bytes);
             if (!valid)
             {
@@ -768,7 +941,7 @@ namespace SkillCooldown
             return valid ? address : nullptr;
         }
 
-        template<typename T> bool Load(T& function, const Native::Method& entry)
+        template<typename T> bool Load(T& function, const Patterns::Method& entry)
         {
             function = reinterpret_cast<T>(Address(entry));
             return function != nullptr;
@@ -776,6 +949,8 @@ namespace SkillCooldown
 
         bool ImageMatches()
         {
+            g_Native = nullptr;
+            g_End = 0;
             __try
             {
                 auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(g_Base);
@@ -783,10 +958,20 @@ namespace SkillCooldown
                     return false;
                 auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(g_Base + dos->e_lfanew);
                 if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-                    nt->FileHeader.TimeDateStamp != Native::Timestamp || nt->OptionalHeader.SizeOfImage != Native::ImageSize)
-                    return false;
-                g_End = g_Base + nt->OptionalHeader.SizeOfImage;
-                return true;
+                    nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return false;
+                for (const auto* profile : Patterns::SkillCooldownProfiles)
+                {
+                    if (nt->FileHeader.TimeDateStamp != profile->Timestamp ||
+                        nt->OptionalHeader.SizeOfImage != profile->ImageSize) continue;
+                    g_Native = profile;
+                    g_End = g_Base + profile->ImageSize;
+                    return true;
+                }
+                char message[128]{};
+                sprintf_s(message, "Unsupported image: timestamp 0x%08lX, size 0x%08lX.",
+                    nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
+                Support::Log(message);
+                return false;
             }
             __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         }
@@ -797,33 +982,36 @@ namespace SkillCooldown
         g_Base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         if (!g_Base || !ImageMatches())
         {
-            Support::Log("Inactive: skill cooldown functions require the verified CN 7.1 image and layout.");
+            Support::Log("Inactive: skill cooldown functions require a verified CN 7.1 or CN 7.2 image and layout.");
             return false;
         }
         bool valid = true;
-#define LOAD(name, field) valid = Load(field, Native::name) && valid
+#define LOAD(name, field) valid = Load(field, g_Native->name) && valid
         LOAD(StringNew, g_StringNew);
         LOAD(ResolveSkill, g_Resolve); LOAD(DecodeFloat, g_DecodeFloat); LOAD(DecodeInt, g_DecodeInt);
         LOAD(CloneText, g_Clone); LOAD(DestroyObject, g_DestroyObject);
         LOAD(GetTransform, g_Transform); LOAD(GetGameObject, g_GameObject);
         LOAD(GameObjectTransform, g_ObjectTransform);
-        LOAD(GetEnabled, g_GetEnabled); LOAD(SetEnabled, g_SetEnabled); LOAD(SetActive, g_SetActive);
+        LOAD(GetEnabled, g_GetEnabled); LOAD(GetActiveInHierarchy, g_GetActiveInHierarchy);
+        LOAD(SetEnabled, g_SetEnabled); LOAD(SetActive, g_SetActive);
         LOAD(GetRect, g_GetRect); LOAD(SetPosition, g_SetPosition);
         LOAD(TransformPoint, g_TransformPoint); LOAD(SetScale, g_SetScale); LOAD(SetSize, g_SetSize);
         LOAD(InverseTransformPoint, g_InversePoint);
         LOAD(SetAnchorMin, g_AnchorMin); LOAD(SetAnchorMax, g_AnchorMax); LOAD(SetPivot, g_Pivot);
         LOAD(SetText, g_SetText); LOAD(SetAlignment, g_Alignment); LOAD(SetRaycast, g_SetRaycast);
         LOAD(FindTransform, g_FindTransform); LOAD(ComponentByType, g_ComponentByType);
+        LOAD(ComponentByName, g_ComponentByName); LOAD(SetMaskFill, g_SetMaskFill);
         LOAD(ConcatStrings, g_Concat); LOAD(SetColor, g_SetColor);
 #undef LOAD
-        struct Hook { const Native::Method* entry; void* replacement; void** original; void* address; };
+        struct Hook { const Patterns::Method* entry; void* replacement; void** original; void* address; };
         Hook hooks[] = {
-            {&Native::BindTeam, reinterpret_cast<void*>(HookBind), reinterpret_cast<void**>(&g_Bind)},
-            {&Native::SetupRow, reinterpret_cast<void*>(HookSetup), reinterpret_cast<void**>(&g_Setup)},
-            {&Native::UpdateRow, reinterpret_cast<void*>(HookUpdate), reinterpret_cast<void**>(&g_Update)},
-            {&Native::DisableRow, reinterpret_cast<void*>(HookDisable), reinterpret_cast<void**>(&g_Disable)},
-            {&Native::DestroyRow, reinterpret_cast<void*>(HookDestroy), reinterpret_cast<void**>(&g_Destroy)},
-            {&Native::SetupCharges, reinterpret_cast<void*>(HookSetupCharges), reinterpret_cast<void**>(&g_SetupCharges)}
+            {&g_Native->BindTeam, reinterpret_cast<void*>(HookBind), reinterpret_cast<void**>(&g_Bind)},
+            {&g_Native->UpdateTeam, reinterpret_cast<void*>(HookUpdateTeam), reinterpret_cast<void**>(&g_UpdateTeam)},
+            {&g_Native->SetupRow, reinterpret_cast<void*>(HookSetup), reinterpret_cast<void**>(&g_Setup)},
+            {&g_Native->UpdateRow, reinterpret_cast<void*>(HookUpdate), reinterpret_cast<void**>(&g_Update)},
+            {&g_Native->DisableRow, reinterpret_cast<void*>(HookDisable), reinterpret_cast<void**>(&g_Disable)},
+            {&g_Native->DestroyRow, reinterpret_cast<void*>(HookDestroy), reinterpret_cast<void**>(&g_Destroy)},
+            {&g_Native->SetupCharges, reinterpret_cast<void*>(HookSetupCharges), reinterpret_cast<void**>(&g_SetupCharges)}
         };
         for (auto& hook : hooks)
         {
@@ -848,7 +1036,7 @@ namespace SkillCooldown
             }
             ++installed;
         }
-        // Only this plugin's six hooks are enabled or rolled back. In particular,
+        // Only this plugin's hooks are enabled or rolled back. In particular,
         // never enable/disable another module's MinHook registry globally.
         bool queued = true;
         for (auto& hook : hooks)
@@ -860,7 +1048,10 @@ namespace SkillCooldown
             Support::Log("Inactive: hook enabling failed; all DisplayCD hooks rolled back.");
             return false;
         }
-        Support::Log("Six DisplayCD HUD hooks enabled (CN 7.1). Native state is read without changing cooldowns.");
+        char message[160]{};
+        sprintf_s(message, "Seven DisplayCD HUD hooks enabled (%s). Native state is read without changing cooldowns.",
+            g_Native->name);
+        Support::Log(message);
         return true;
     }
 }

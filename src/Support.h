@@ -9,6 +9,6 @@ namespace Support
     void Log(const char* message);
     bool Match(const void* address, const char* bytes);
     // SetActive is shared with the main plugin/runtime. Accept its known
-    // MinHook broker only after checking the unmodified suffix and owner.
+    // MinHook broker/UI observer only after checking the unmodified suffix and owner.
     bool SharedSetActive(void* address, const char* bytes);
 }

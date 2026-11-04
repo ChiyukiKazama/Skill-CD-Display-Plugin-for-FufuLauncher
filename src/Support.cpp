@@ -72,14 +72,31 @@ namespace Support
             static_cast<LPCWSTR>(target), &owner)) return false;
         wchar_t path[32768]{};
         if (!GetModuleFileNameW(owner, path, 32768)) return false;
-        const auto name = std::filesystem::path(path).filename().wstring();
+        // GetModuleFileNameW preserves the loader's spelling, including DOS 8.3
+        // aliases such as MAINUI~1.DLL. Resolve that spelling before comparing
+        // module identities; accepting an alias string itself would be ambiguous.
+        std::wstring longPath(32768, L'\0');
+        const auto length = GetLongPathNameW(path, longPath.data(), static_cast<DWORD>(longPath.size()));
+        if (!length || length >= longPath.size()) return false;
+        longPath.resize(length);
+        const auto name = std::filesystem::path(longPath).filename().wstring();
         if (_wcsicmp(name.c_str(), L"FufuLauncher.UnlockerIsland.dll") != 0 &&
-            _wcsicmp(name.c_str(), L"DetachedRuntime.dll") != 0) return false;
+            _wcsicmp(name.c_str(), L"DetachedRuntime.dll") != 0 &&
+            _wcsicmp(name.c_str(), L"MainUICustomizer.dll") != 0)
+        {
+            char moduleName[512]{};
+            WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, moduleName, sizeof(moduleName), nullptr, nullptr);
+            char message[600]{};
+            sprintf_s(message, "SetActive rejected: unrecognized detour module %s.", moduleName);
+            Log(message);
+            return false;
+        }
         MEMORY_BASIC_INFORMATION info{};
         if (!VirtualQuery(target, &info, sizeof(info)) || info.State != MEM_COMMIT ||
             (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
             !(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return false;
-        // Calls still enter the broker; observers/filters retain normal behavior.
+        // MainUICustomizer observes activation and forwards the original request.
+        // Keep the public entry so every broker/observer still receives our calls.
         return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
             static_cast<LPCWSTR>(target), &owner) != FALSE;
     }
