@@ -3,6 +3,7 @@
 #include "Support.h"
 #include "HookSetupGuard.h"
 #include "SkillCooldown/SkillCooldown.h"
+#include <cwchar>
 #include <exception>
 
 namespace
@@ -14,9 +15,12 @@ namespace
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(&Worker), &pinned)) return 0;
         wchar_t executable[32768]{};
-        GetModuleFileNameW(nullptr, executable, 32768);
-        if (_wcsicmp(std::filesystem::path(executable).filename().c_str(), L"YuanShen.exe") != 0)
-        { Support::Log("Inactive: only verified CN 7.1 / CN 7.2 YuanShen.exe builds are supported."); return 0; }
+        const DWORD length = GetModuleFileNameW(nullptr, executable, 32768);
+        if (length == 0 || length >= 32768) return 0;
+        const auto* separator = std::wcsrchr(executable, L'\\');
+        const auto* executableName = separator ? separator + 1 : executable;
+        if (!SkillCooldown::IsSupportedExecutable(executableName))
+        { Support::Log("Inactive: expected YuanShen.exe or GenshinImpact.exe."); return 0; }
         try
         {
             const auto config = Support::Directory() / L"config.ini";
@@ -24,7 +28,7 @@ namespace
             {
                 Detached::HookSetupGuard guard;
                 if (!guard) { Support::Log("Inactive: timed out waiting for shared hook setup."); return 0; }
-                if (!SkillCooldown::Init()) return 0;
+                if (!SkillCooldown::Init(executableName)) return 0;
             }
             Support::Log("DisplayCD " DISPLAYCD_VERSION " initialized; configuration reload interval: 250 ms.");
             for (;;)

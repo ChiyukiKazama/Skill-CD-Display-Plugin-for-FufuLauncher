@@ -12,6 +12,7 @@ Licensed under the AGPL-3.0 License.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -140,7 +141,7 @@ namespace SkillCooldown
             if (!object) return nullptr;
             auto* klass = Read<void*>(object, 0);
             if (!klass) return nullptr;
-            // Both verified binaries use 8-byte code entries in their IL2CPP vtable.
+            // The verified 7.2 binaries use 8-byte code entries in the IL2CPP vtable.
             auto address = Read<uintptr_t>(klass, g_Native->layout.VTable + slot * sizeof(void*));
             if (address < g_Base || address >= g_End) return nullptr;
             return reinterpret_cast<T>(address);
@@ -947,7 +948,7 @@ namespace SkillCooldown
             return function != nullptr;
         }
 
-        bool ImageMatches()
+        bool ImageMatches(const wchar_t* executableName)
         {
             g_Native = nullptr;
             g_End = 0;
@@ -961,7 +962,8 @@ namespace SkillCooldown
                     nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return false;
                 for (const auto* profile : Patterns::SkillCooldownProfiles)
                 {
-                    if (nt->FileHeader.TimeDateStamp != profile->Timestamp ||
+                    if (_wcsicmp(executableName, profile->executableName) != 0 ||
+                        nt->FileHeader.TimeDateStamp != profile->Timestamp ||
                         nt->OptionalHeader.SizeOfImage != profile->ImageSize) continue;
                     g_Native = profile;
                     g_End = g_Base + profile->ImageSize;
@@ -977,12 +979,19 @@ namespace SkillCooldown
         }
     }
 
-    bool Init()
+    bool IsSupportedExecutable(const wchar_t* executableName)
+    {
+        for (const auto* profile : Patterns::SkillCooldownProfiles)
+            if (_wcsicmp(executableName, profile->executableName) == 0) return true;
+        return false;
+    }
+
+    bool Init(const wchar_t* executableName)
     {
         g_Base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-        if (!g_Base || !ImageMatches())
+        if (!g_Base || !ImageMatches(executableName))
         {
-            Support::Log("Inactive: skill cooldown functions require a verified CN 7.1 or CN 7.2 image and layout.");
+            Support::Log("Inactive: skill cooldown functions require a verified CN or OS 7.2 image and layout.");
             return false;
         }
         bool valid = true;

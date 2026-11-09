@@ -6,5 +6,6 @@ Licensed under the AGPL-3.0 License.
 
 namespace SkillCooldown
 {
-    bool Init();
+    bool IsSupportedExecutable(const wchar_t* executableName);
+    bool Init(const wchar_t* executableName);
 }
